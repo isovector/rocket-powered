@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
 
 module Main where
 
@@ -36,16 +36,17 @@ data Effect
     deriving (Show, Read, Eq)
 
 newtype Battle a = Battle
-    { runBattle' :: RWS CombatEnv [Effect] () a }
+    { runBattle' :: RWST CombatEnv [Effect] () IO a }
     deriving ( Functor
              , Applicative
              , Monad
+             , MonadIO
              , MonadReader CombatEnv
              , MonadWriter [Effect]
              )
 
-runBattle :: Battle a -> CombatEnv -> (a, [Effect])
-runBattle b env = evalRWS (runBattle' b) env ()
+runBattle :: Battle a -> CombatEnv -> IO (a, [Effect])
+runBattle b env = evalRWST (runBattle' b) env ()
 
 bAttacker :: Battle Person
 bAttacker = asks cenvAttacker
@@ -65,13 +66,18 @@ bAllies = bWithTeam elem
 bEnemies :: Battle [Person]
 bEnemies = bWithTeam $ \me -> not . elem me
 
+change :: (Monad m, MonadWriter [t] m, MonadIO m, Show t) => t -> m ()
+change x = do
+    liftIO . putStrLn $ show x
+    tell [x]
+
 teamHeal :: Int -> Battle ()
 teamHeal dmg = do
     allies <- bAllies
-    forM_ allies $ \who -> tell [Heal who dmg dmg]
+    forM_ allies $ \who -> change $ Heal who dmg dmg
 
 attack :: Person -> Int -> Battle ()
-attack target dmg = tell [Damage target dmg dmg]
+attack target dmg = change $ Damage target dmg dmg
 
 chainAttack :: Int -> Battle ()
 chainAttack dmg = do
@@ -81,6 +87,7 @@ chainAttack dmg = do
 battle :: Battle ()
 battle = do
     chainAttack 10
+    liftIO getChar
     teamHeal 20
 
 env = CombatEnv
@@ -94,5 +101,8 @@ env = CombatEnv
           bg1 = Person { perHP = 201 }
           bg2 = Person { perHP = 202 }
 
-main = mapM_ (putStrLn . show) . snd $ runBattle battle env
+main = do
+    runBattle battle env
+    return ()
+    -- mapM_ (putStrLn . show) $ results
 
