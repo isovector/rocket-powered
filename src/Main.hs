@@ -4,16 +4,27 @@ module Main where
 
 import Control.Applicative
 import Control.Monad.RWS.Lazy
+import Data.Ord (comparing, Ordering (EQ))
 
-data Attributes
-    = Big
+data Attribute
+    = None
+    | Big
     | Small
+    | Holy
+    | Unholy
     deriving (Show, Read, Eq)
 
 data Person = Person
     { perHP :: Int
-    -- , perAttribs :: Attributes
-    } deriving (Show, Read, Eq)
+    -- , perDmgHandler :: Effect -> Battle ()
+    }
+
+instance Show Person where
+    show = show . perHP
+
+instance Eq Person where
+    -- TODO: super big hack
+    a == b = perHP a == perHP b
 
 data CombatEnv = CombatEnv
     { cenvTeams :: [[Person]]
@@ -23,30 +34,40 @@ data CombatEnv = CombatEnv
     , cenvAttackerMay :: Maybe Person
     }
 
+instance Show CombatEnv where
+    show = const "combat"
+
 data Status
     = Burning
     | Bleeding
     deriving (Show, Read, Eq)
 
-data Effect
-    = Damage Person Int Int
-    | Heal Person Int Int
+data RawEffect
+    = Damage Person Attribute Int
+    | Heal Person Int
     | AddStatus Person Status
     | RemoveStatus Person Status
-    deriving (Show, Read, Eq)
+    deriving Show
+
+getTarget :: RawEffect -> Maybe Person
+getTarget (Damage p _ _)     = Just p
+getTarget (Heal p _)         = Just p
+getTarget (AddStatus p _)    = Just p
+getTarget (RemoveStatus p _) = Just p
+
+type Effect = (RawEffect, CombatEnv)
 
 newtype Battle a = Battle
-    { runBattle' :: RWST CombatEnv [Effect] () IO a }
+    { runBattle' :: RWS CombatEnv [Effect] () a }
     deriving ( Functor
              , Applicative
              , Monad
-             , MonadIO
              , MonadReader CombatEnv
              , MonadWriter [Effect]
              )
 
-runBattle :: Battle a -> CombatEnv -> IO (a, [Effect])
-runBattle b env = evalRWST (runBattle' b) env ()
+runBattle :: CombatEnv -> Battle a -> (a, [Effect])
+runBattle env b = evalRWS (runBattle' b) env ()
 
 bAttacker :: Battle Person
 bAttacker = asks cenvAttacker
@@ -66,33 +87,47 @@ bAllies = bWithTeam elem
 bEnemies :: Battle [Person]
 bEnemies = bWithTeam $ \me -> not . elem me
 
-change :: (Monad m, MonadWriter [t] m, MonadIO m, Show t) => t -> m ()
-change x = do
-    liftIO . putStrLn $ show x
-    tell [x]
+change :: RawEffect -> Battle ()
+change e = do
+    env <- ask
+    let effect = (e, env)
+    tell [effect]
+    -- case cenvTargetMay env of
+    --   Just p  -> perDmgHandler p $ effect
+    --   Nothing -> return ()
 
 teamHeal :: Int -> Battle ()
 teamHeal dmg = do
     allies <- bAllies
-    forM_ allies $ \who -> change $ Heal who dmg dmg
+    forM_ allies $ \who -> change $ Heal who dmg
 
 attack :: Person -> Int -> Battle ()
-attack target dmg = change $ Damage target dmg dmg
+attack target dmg = change $ Damage target None dmg
 
 chainAttack :: Int -> Battle ()
 chainAttack dmg = do
     enemies <- bEnemies
     forM_ enemies $ flip attack dmg
 
+-- handleDamage :: [Effect] -> [Effect]
+-- handleDamage = map snd . filter fst . map handle
+--     where
+--         handle e =
+--             let target = getTarget e
+--              in runBattle env $ do
+--                  return ()
+
+
+
+
 battle :: Battle ()
 battle = do
     chainAttack 10
-    liftIO getChar
     teamHeal 20
 
 env = CombatEnv
     { cenvTeams = [ [ me ], [ bg1, bg2 ] ]
-     , cenvTarget = bg1
+    , cenvTarget = bg1
     , cenvTargetMay = Just bg1
     , cenvAttacker = me
     , cenvAttackerMay = Just me
@@ -102,7 +137,6 @@ env = CombatEnv
           bg2 = Person { perHP = 202 }
 
 main = do
-    runBattle battle env
-    return ()
-    -- mapM_ (putStrLn . show) $ results
+    let results = snd $ runBattle env battle
+    mapM_ (putStrLn . show) $ results
 
