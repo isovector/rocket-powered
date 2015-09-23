@@ -122,12 +122,25 @@ battle = do
     chainAttack 10
     teamHeal 20
 
+exchange :: Battle () -> Battle ()
+exchange = local $ \r -> r { cenvTarget   = cenvAttacker r
+                           , cenvAttacker = cenvTarget r
+                           }
+
+depthGuard :: Int -> Battle () -> Battle ()
+depthGuard n b = do
+    depth <- asks cenvDepth
+    if depth <= n
+       then b
+       else return ()
+
 thorns :: Effect -> Battle ()
-thorns e@(Damage p _ dmg) = do
+thorns e@(Damage p _ dmg) = depthGuard 2 $ do
     accept e
     bAttacker >>= \case
-        Just aggro -> suggest . Damage aggro None $ dmg `div` 10
+        Just aggro -> exchange . suggest . Damage aggro None $ dmg `div` 2
         Nothing    -> return ()
+thorns e = accept e
 
 
 env = CombatEnv
@@ -137,7 +150,7 @@ env = CombatEnv
     , cenvActor = Just me
     , cenvDepth = 0
     }
-    where me = Person { perHP = 100, perDmgHandler = accept }
+    where me = Person { perHP = 100, perDmgHandler = thorns }
           bg1 = Person { perHP = 201, perDmgHandler = thorns }
           bg2 = Person { perHP = 202, perDmgHandler = accept }
 
