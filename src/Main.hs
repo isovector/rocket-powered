@@ -109,13 +109,13 @@ chainAttack dmg = do
     enemies <- bEnemies
     forM_ enemies $ flip attack dmg
 
--- handleDamage :: [Effect] -> [Effect]
--- handleDamage = map snd . filter fst . map handle
---     where
---         handle e =
---             let target = getTarget e
---              in runBattle env $ do
---                  return ()
+handleDamage :: [Effect] -> [Effect]
+handleDamage = concatMap snd . filter fst . map handle
+    where
+        handle (e, env) =
+            let target = getTarget e
+             in runBattle env $ do
+                 return (True)
 
 
 
