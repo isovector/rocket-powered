@@ -1,4 +1,4 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, LambdaCase #-}
 
 module Main where
 
@@ -16,7 +16,7 @@ data Attribute
 
 data Person = Person
     { perHP :: Int
-    -- , perDmgHandler :: Effect -> Battle ()
+    , perDmgHandler :: Effect -> Battle ()
     }
 
 instance Show Person where
@@ -28,10 +28,10 @@ instance Eq Person where
 
 data CombatEnv = CombatEnv
     { cenvTeams :: [[Person]]
-    , cenvTarget :: Person
-    , cenvTargetMay :: Maybe Person
-    , cenvAttacker :: Person
-    , cenvAttackerMay :: Maybe Person
+    , cenvTarget :: Maybe Person
+    , cenvAttacker :: Maybe Person
+    , cenvActor :: Maybe Person
+    , cenvDepth :: Int
     }
 
 instance Show CombatEnv where
@@ -42,20 +42,18 @@ data Status
     | Bleeding
     deriving (Show, Read, Eq)
 
-data RawEffect
+data Effect
     = Damage Person Attribute Int
     | Heal Person Int
     | AddStatus Person Status
     | RemoveStatus Person Status
     deriving Show
 
-getTarget :: RawEffect -> Maybe Person
+getTarget :: Effect -> Maybe Person
 getTarget (Damage p _ _)     = Just p
 getTarget (Heal p _)         = Just p
 getTarget (AddStatus p _)    = Just p
 getTarget (RemoveStatus p _) = Just p
-
-type Effect = (RawEffect, CombatEnv)
 
 newtype Battle a = Battle
     { runBattle' :: RWS CombatEnv [Effect] () a }
@@ -69,72 +67,79 @@ newtype Battle a = Battle
 runBattle :: CombatEnv -> Battle a -> (a, [Effect])
 runBattle env b = evalRWS (runBattle' b) env ()
 
-bAttacker :: Battle Person
+bActor :: Battle (Maybe Person)
+bActor = asks cenvActor
+
+bAttacker :: Battle (Maybe Person)
 bAttacker = asks cenvAttacker
 
-bTarget :: Battle Person
+bTarget :: Battle (Maybe Person)
 bTarget = asks cenvTarget
 
-bWithTeam :: (Person -> [Person] -> Bool) -> Battle [Person]
-bWithTeam p = do
-    me <- bAttacker
+bWithTeam :: Person -> (Person -> [Person] -> Bool) -> Battle [Person]
+bWithTeam me p = do
     teams <- asks cenvTeams
     return . concat $ filter (p me) teams
 
 bAllies :: Battle [Person]
-bAllies = bWithTeam elem
+bAllies = bActor >>= \case
+            Just a  -> bWithTeam a elem
+            Nothing -> return []
 
 bEnemies :: Battle [Person]
-bEnemies = bWithTeam $ \me -> not . elem me
+bEnemies = bActor >>= \case
+             Just a  -> bWithTeam a $ \me -> not . elem me
+             Nothing -> asks $ concat . cenvTeams
 
-change :: RawEffect -> Battle ()
-change e = do
-    env <- ask
-    let effect = (e, env)
-    tell [effect]
-    -- case cenvTargetMay env of
-    --   Just p  -> perDmgHandler p $ effect
-    --   Nothing -> return ()
+
+suggest :: Effect -> Battle ()
+suggest e
+    | Just p <- getTarget e =
+        flip local (perDmgHandler p e) $
+            \r -> r { cenvActor = Just p
+                    , cenvDepth = 1 + cenvDepth r
+                    }
+    | otherwise = return ()
+
+accept :: Effect -> Battle ()
+accept = tell . return
 
 teamHeal :: Int -> Battle ()
 teamHeal dmg = do
     allies <- bAllies
-    forM_ allies $ \who -> change $ Heal who dmg
+    forM_ allies $ \who -> suggest $ Heal who dmg
 
 attack :: Person -> Int -> Battle ()
-attack target dmg = change $ Damage target None dmg
+attack target dmg = suggest $ Damage target None dmg
 
 chainAttack :: Int -> Battle ()
 chainAttack dmg = do
     enemies <- bEnemies
     forM_ enemies $ flip attack dmg
 
-handleDamage :: [Effect] -> [Effect]
-handleDamage = concatMap snd . filter fst . map handle
-    where
-        handle (e, env) =
-            let target = getTarget e
-             in runBattle env $ do
-                 return (True)
-
-
-
-
 battle :: Battle ()
 battle = do
     chainAttack 10
     teamHeal 20
 
+thorns :: Effect -> Battle ()
+thorns e@(Damage p _ dmg) = do
+    accept e
+    bAttacker >>= \case
+        Just aggro -> suggest . Damage aggro None $ dmg `div` 10
+        Nothing    -> return ()
+
+
 env = CombatEnv
     { cenvTeams = [ [ me ], [ bg1, bg2 ] ]
-    , cenvTarget = bg1
-    , cenvTargetMay = Just bg1
-    , cenvAttacker = me
-    , cenvAttackerMay = Just me
+    , cenvTarget = Just bg1
+    , cenvAttacker = Just me
+    , cenvActor = Just me
+    , cenvDepth = 0
     }
-    where me = Person { perHP = 100 }
-          bg1 = Person { perHP = 201 }
-          bg2 = Person { perHP = 202 }
+    where me = Person { perHP = 100, perDmgHandler = accept }
+          bg1 = Person { perHP = 201, perDmgHandler = thorns }
+          bg2 = Person { perHP = 202, perDmgHandler = accept }
 
 main = do
     let results = snd $ runBattle env battle
