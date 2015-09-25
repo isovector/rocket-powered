@@ -5,6 +5,8 @@ module Main where
 import Control.Applicative
 import Control.Monad.RWS.Lazy
 import Data.Ord (comparing, Ordering (EQ))
+import System.Random
+
 
 data Attribute
     = None
@@ -12,6 +14,7 @@ data Attribute
     | Small
     | Holy
     | Unholy
+    | Magic
     deriving (Show, Read, Eq)
 
 data Person = Person
@@ -59,16 +62,17 @@ getTarget (AddStatus p _)    = Just p
 getTarget (RemoveStatus p _) = Just p
 
 newtype Battle a = Battle
-    { runBattle' :: RWS CombatEnv [Effect] () a }
+    { runBattle' :: RWST CombatEnv [Effect] () IO a }
     deriving ( Functor
              , Applicative
              , Monad
+             , MonadIO
              , MonadReader CombatEnv
              , MonadWriter [Effect]
              )
 
-runBattle :: CombatEnv -> Battle a -> (a, [Effect])
-runBattle env b = evalRWS (runBattle' b) env ()
+runBattle :: CombatEnv -> Battle a -> IO (a, [Effect])
+runBattle env b = evalRWST (runBattle' b) env ()
 
 bActor :: Battle (Maybe Person)
 bActor = asks cenvActor
@@ -119,11 +123,6 @@ chainAttack dmg = do
     enemies <- bEnemies
     forM_ enemies $ flip attack dmg
 
-battle :: Combat
-battle = do
-    chainAttack 10
-    teamHeal 20
-
 exchange :: Combat -> Combat
 exchange = local $ \r -> r { cenvTarget   = cenvAttacker r
                            , cenvAttacker = cenvTarget r
@@ -137,12 +136,32 @@ depthGuard n b = do
        else return ()
 
 thorns :: Effect -> Combat
-thorns e@(Damage p _ dmg) = depthGuard 2 $ do
+thorns e@(Damage _ Magic _) = accept e
+thorns e@(Damage p _ dmg)   = depthGuard 2 $ do
     accept e
     bAttacker >>= \case
         Just aggro -> exchange . suggest . Damage aggro None $ dmg `div` 2
         Nothing    -> return ()
 thorns e = accept e
+
+magicMissile :: Combat
+magicMissile = do
+    num <- rand 3 5
+    enemies <- bEnemies
+    let len = length enemies - 1
+    forM_ [1..num] $ \_ -> do
+        badGuy <- (!!) <$> bEnemies <*> rand 0 len
+        dmg <- rand 5 12
+        suggest $ Damage badGuy Magic dmg
+
+rand :: Int -> Int -> Battle Int
+rand a b = liftIO . getStdRandom $ randomR (a, b)
+
+battle :: Combat
+battle = do
+    chainAttack 10
+    teamHeal 20
+    magicMissile
 
 
 env = CombatEnv
@@ -157,6 +176,6 @@ env = CombatEnv
           bg2 = Person { perHP = 202, perDmgHandler = accept }
 
 main = do
-    let results = snd $ runBattle env battle
+    results <- snd <$> runBattle env battle
     mapM_ (putStrLn . show) $ results
 
