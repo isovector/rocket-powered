@@ -144,6 +144,24 @@ thorns e@(Damage p _ dmg)   = depthGuard 2 $ do
         Nothing    -> return ()
 thorns e = accept e
 
+rewrite :: (Effect -> Battle (Maybe Effect)) -> Combat -> Combat
+rewrite f c = do
+    env <- ask
+    (_, es) <- liftIO $ runBattle env c
+    forM_ es $ \e ->
+        f e >>= \case
+          Just r  -> accept r
+          Nothing -> return ()
+
+noise :: Int -> Combat -> Combat
+noise max = rewrite noise'
+  where
+    noise' (Damage t a dmg) = do
+        delta <- rand (-max) max
+        return . Just . Damage t a $ dmg + delta
+    noise' e = return $ Just e
+
+
 magicMissile :: Combat
 magicMissile = do
     num <- rand 3 5
@@ -151,8 +169,7 @@ magicMissile = do
     let len = length enemies - 1
     forM_ [1..num] $ \_ -> do
         badGuy <- (!!) <$> bEnemies <*> rand 0 len
-        dmg <- rand 5 12
-        suggest $ Damage badGuy Magic dmg
+        noise 3 . suggest $ Damage badGuy Magic 8
 
 rand :: Int -> Int -> Battle Int
 rand a b = liftIO . getStdRandom $ randomR (a, b)
@@ -171,8 +188,8 @@ env = CombatEnv
     , cenvActor = Just me
     , cenvDepth = 0
     }
-    where me = Person { perHP = 100, perDmgHandler = thorns }
-          bg1 = Person { perHP = 201, perDmgHandler = thorns }
+    where me =  Person { perHP = 100, perDmgHandler = accept }
+          bg1 = Person { perHP = 201, perDmgHandler = accept }
           bg2 = Person { perHP = 202, perDmgHandler = accept }
 
 main = do
