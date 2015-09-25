@@ -16,8 +16,11 @@ data Attribute
 
 data Person = Person
     { perHP :: Int
-    , perDmgHandler :: Effect -> Battle ()
+    , perDmgHandler :: DmgHandler
     }
+
+type Combat = Battle ()
+type DmgHandler = Effect -> Combat
 
 instance Show Person where
     show = show . perHP
@@ -91,8 +94,7 @@ bEnemies = bActor >>= \case
              Just a  -> bWithTeam a $ \me -> not . elem me
              Nothing -> asks $ concat . cenvTeams
 
-
-suggest :: Effect -> Battle ()
+suggest :: Effect -> Combat
 suggest e
     | Just p <- getTarget e =
         flip local (perDmgHandler p e) $
@@ -101,40 +103,40 @@ suggest e
                     }
     | otherwise = return ()
 
-accept :: Effect -> Battle ()
+accept :: Effect -> Combat
 accept = tell . return
 
-teamHeal :: Int -> Battle ()
+teamHeal :: Int -> Combat
 teamHeal dmg = do
     allies <- bAllies
     forM_ allies $ \who -> suggest $ Heal who dmg
 
-attack :: Person -> Int -> Battle ()
+attack :: Person -> Int -> Combat
 attack target dmg = suggest $ Damage target None dmg
 
-chainAttack :: Int -> Battle ()
+chainAttack :: Int -> Combat
 chainAttack dmg = do
     enemies <- bEnemies
     forM_ enemies $ flip attack dmg
 
-battle :: Battle ()
+battle :: Combat
 battle = do
     chainAttack 10
     teamHeal 20
 
-exchange :: Battle () -> Battle ()
+exchange :: Combat -> Combat
 exchange = local $ \r -> r { cenvTarget   = cenvAttacker r
                            , cenvAttacker = cenvTarget r
                            }
 
-depthGuard :: Int -> Battle () -> Battle ()
+depthGuard :: Int -> Combat -> Combat
 depthGuard n b = do
     depth <- asks cenvDepth
     if depth <= n
        then b
        else return ()
 
-thorns :: Effect -> Battle ()
+thorns :: Effect -> Combat
 thorns e@(Damage p _ dmg) = depthGuard 2 $ do
     accept e
     bAttacker >>= \case
