@@ -1,198 +1,116 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, LambdaCase #-}
+{-# LANGUAGE LambdaCase, Rank2Types, DeriveFunctor, MultiParamTypeClasses #-}
 
 module Main where
 
 import Control.Applicative
-import Control.Monad.RWS.Lazy
-import Data.Ord (comparing, Ordering (EQ))
+import Control.Comonad.Cofree
+import Control.Monad.Free
+import Control.Monad (ap)
+import Data.Traversable
 import System.Random
 
+class (Functor f, Functor g) => Pairing f g where
+    pair :: (a -> b -> r) -> f a -> g b -> r
 
-data Attribute
-    = None
-    | Big
-    | Small
-    | Holy
-    | Unholy
-    | Magic
-    deriving (Show, Read, Eq)
+instance Pairing ((->) a) ((,) a) where
+    pair p f = uncurry (p . f)
 
-data Person = Person
-    { perHP :: Int
-    , perDmgHandler :: DmgHandler
+instance Pairing ((,) a) ((->) a) where
+    pair p f g = pair (flip p) g f
+
+instance Pairing f g => Pairing (Cofree f) (Free g) where
+    pair p (a :< _ ) (Pure x)  = p a x
+    pair p (_ :< fs) (Free gs) = pair (pair p) fs gs
+
+instance Pairing CoActionF Action where
+    pair f (CoActionF c _ _) (Damage x k)    = f (c x) k
+    pair f (CoActionF _ c _) (AddStatus x k) = f (c x) k
+    pair f (CoActionF _ _ c) (RemStatus x k) = f (c x) k
+
+data Status = None
+            | Bleeding
+            deriving (Show, Eq, Enum, Read)
+
+data Action n = Damage Int n
+              | AddStatus Status n
+              | RemStatus Status n
+              | Rand Int Int (Int -> n)
+              deriving Functor
+
+data CoActionF n = CoActionF
+    { damageH   :: Int -> n
+    , addStatusH :: Status -> n
+    , remStatusH :: Status -> n
+    -- , randH :: Int -> Int -> (Int, n)
     }
+    deriving Functor
 
-type Combat = Battle ()
-type DmgHandler = Effect -> Combat
+type Combat a = Free Action a
 
-instance Show Person where
-    show = show . perHP
+damage d       = liftF $ Damage d ()
+addStatus s    = liftF $ AddStatus s ()
+remStatus s    = liftF $ RemStatus s ()
+rand i j       = liftF $ Rand i j id
 
-instance Eq Person where
-    -- TODO: super big hack
-    a == b = perHP a == perHP b
-
-data CombatEnv = CombatEnv
-    { cenvTeams :: [[Person]]
-    , cenvTarget :: Maybe Person
-    , cenvAttacker :: Maybe Person
-    , cenvActor :: Maybe Person
-    , cenvDepth :: Int
-    }
-
-instance Show CombatEnv where
-    show = const "combat"
-
-data Status
-    = Burning
-    | Bleeding
-    deriving (Show, Read, Eq)
-
-data Effect
-    = Damage Person Attribute Int
-    | Heal Person Int
-    | AddStatus Person Status
-    | RemoveStatus Person Status
-    deriving Show
-
-getTarget :: Effect -> Maybe Person
-getTarget (Damage p _ _)     = Just p
-getTarget (Heal p _)         = Just p
-getTarget (AddStatus p _)    = Just p
-getTarget (RemoveStatus p _) = Just p
-
-newtype Battle a = Battle
-    { runBattle' :: RWST CombatEnv [Effect] () IO a }
-    deriving ( Functor
-             , Applicative
-             , Monad
-             , MonadIO
-             , MonadReader CombatEnv
-             , MonadWriter [Effect]
-             )
-
-runBattle :: CombatEnv -> Battle a -> IO (a, [Effect])
-runBattle env b = evalRWST (runBattle' b) env ()
-
-bActor :: Battle (Maybe Person)
-bActor = asks cenvActor
-
-bAttacker :: Battle (Maybe Person)
-bAttacker = asks cenvAttacker
-
-bTarget :: Battle (Maybe Person)
-bTarget = asks cenvTarget
-
-bWithTeam :: Person -> (Person -> [Person] -> Bool) -> Battle [Person]
-bWithTeam me p = do
-    teams <- asks cenvTeams
-    return . concat $ filter (p me) teams
-
-bAllies :: Battle [Person]
-bAllies = bActor >>= \case
-            Just a  -> bWithTeam a elem
-            Nothing -> return []
-
-bEnemies :: Battle [Person]
-bEnemies = bActor >>= \case
-             Just a  -> bWithTeam a $ \me -> not . elem me
-             Nothing -> asks $ concat . cenvTeams
-
-suggest :: Effect -> Combat
-suggest e
-    | Just p <- getTarget e =
-        flip local (perDmgHandler p e) $
-            \r -> r { cenvActor = Just p
-                    , cenvDepth = 1 + cenvDepth r
-                    }
-    | otherwise = return ()
-
-accept :: Effect -> Combat
-accept = tell . return
-
-teamHeal :: Int -> Combat
-teamHeal dmg = do
-    allies <- bAllies
-    forM_ allies $ \who -> suggest $ Heal who dmg
-
-attack :: Person -> Int -> Combat
-attack target dmg = suggest $ Damage target None dmg
-
-chainAttack :: Int -> Combat
-chainAttack dmg = do
-    enemies <- bEnemies
-    forM_ enemies $ flip attack dmg
-
-exchange :: Combat -> Combat
-exchange = local $ \r -> r { cenvTarget   = cenvAttacker r
-                           , cenvAttacker = cenvTarget r
-                           }
-
-depthGuard :: Int -> Combat -> Combat
-depthGuard n b = do
-    depth <- asks cenvDepth
-    if depth <= n
-       then b
-       else return ()
-
-thorns :: Effect -> Combat
-thorns e@(Damage _ Magic _) = accept e
-thorns e@(Damage p _ dmg)   = depthGuard 2 $ do
-    accept e
-    bAttacker >>= \case
-        Just aggro -> exchange . suggest . Damage aggro None $ dmg `div` 2
-        Nothing    -> return ()
-thorns e = accept e
-
-rewrite :: (Effect -> Battle (Maybe Effect)) -> Combat -> Combat
-rewrite f c = do
-    env <- ask
-    (_, es) <- liftIO $ runBattle env c
-    forM_ es $ \e ->
-        f e >>= \case
-          Just r  -> accept r
-          Nothing -> return ()
-
-noise :: Int -> Combat -> Combat
-noise max = rewrite noise'
+type CoAction a = Cofree CoActionF a
+mkCoAction :: CoAction (IO ())
+mkCoAction = coiter next $ return ()
   where
-    noise' (Damage t a dmg) = do
-        delta <- rand (-max) max
-        return . Just . Damage t a $ dmg + delta
-    noise' e = return $ Just e
+    next = return CoActionF `ap` coDamage
+                            `ap` coAddStatus
+                            `ap` coRemStatus
+                         -- `ap` coRand
+
+coDamage :: IO () -> Int -> IO ()
+coDamage w i = do
+    w
+    putStrLn $ "damage:\t\t" ++ show i
+
+coAddStatus :: IO () -> Status -> IO ()
+coAddStatus w s = do
+    w
+    putStrLn $ "+status:\t" ++ show s
+
+coRemStatus :: IO () -> Status -> IO ()
+coRemStatus w s = do
+    w
+    putStrLn $ "-status:\t" ++ show s
+
+-- coRand :: IO () -> Int -> Int -> (Int, IO ())
+-- coRand w i j = do
+--     w
+--     result <- getStdRandom $ randomR (i, j)
+--     printEffect $ k result
 
 
-magicMissile :: Combat
-magicMissile = do
-    num <- rand 3 5
-    enemies <- bEnemies
-    let len = length enemies - 1
-    forM_ [1..num] $ \_ -> do
-        badGuy <- (!!) <$> bEnemies <*> rand 0 len
-        noise 3 . suggest $ Damage badGuy Magic 8
+-- make this a cofree comonad when you get the chance
+printEffect :: Combat a -> IO a
+printEffect (Pure a) = return a
+printEffect (Free x)
+    | (Damage i n) <- x = do
+        putStrLn $ "damage:\t\t" ++ show i
+        printEffect n
+    | (AddStatus s n) <- x = do
+        putStrLn $ "+status:\t" ++ show s
+        printEffect n
+    | (RemStatus s n) <- x = do
+        putStrLn $ "-status:\t" ++ show s
+        printEffect n
+    | (Rand i j k) <- x = do
+        result <- getStdRandom $ randomR (i, j)
+        printEffect $ k result
 
-rand :: Int -> Int -> Battle Int
-rand a b = liftIO . getStdRandom $ randomR (a, b)
-
-battle :: Combat
+battle :: Combat ()
 battle = do
-    chainAttack 10
-    teamHeal 20
-    magicMissile
+    -- dmg <- rand 8 12
+    damage 6
+    addStatus Bleeding
+    damage 2
+
+runBattle w = pair (\_ b -> b) w battle
 
 
-env = CombatEnv
-    { cenvTeams = [ [ me ], [ bg1, bg2 ] ]
-    , cenvTarget = Just bg1
-    , cenvAttacker = Just me
-    , cenvActor = Just me
-    , cenvDepth = 0
-    }
-    where me =  Person { perHP = 100, perDmgHandler = accept }
-          bg1 = Person { perHP = 201, perDmgHandler = accept }
-          bg2 = Person { perHP = 202, perDmgHandler = accept }
+-- rand :: Int -> Int -> IO Int
+-- rand a b = getStdRandom $ randomR (a, b)
 
-main = do
-    results <- snd <$> runBattle env battle
-    mapM_ (putStrLn . show) $ results
-
+main = printEffect battle
